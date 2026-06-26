@@ -1,0 +1,390 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+
+BIN="${NMMINER_BIN:-./nmminer}"
+COLOR_MODE="${NMMINER_OVERLAY_COLOR:-always}"
+SCREEN_MODE="${NMMINER_OVERLAY_MODE:-pretty}"
+pass_args=()
+
+usage() {
+  cat <<'USAGE'
+Bitcoinandy CRB miner 0% fee
+
+Usage:
+  ./nmminer-overlay [nmminer options]
+  ./nmminer-overlay --raw [nmminer options]
+
+Examples:
+  ./nmminer-overlay -o us.cereblix.com:3333 -u crb1...worker
+  ./nmminer-overlay --raw -o us.cereblix.com:3333 -u crb1...worker
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --raw)
+      SCREEN_MODE="raw"; shift ;;
+    --screen-mode)
+      SCREEN_MODE="${2:?--screen-mode requires pretty or raw}"; shift 2 ;;
+    --color)
+      COLOR_MODE="${2:?--color requires always, auto, or never}"; shift 2 ;;
+    --no-color)
+      COLOR_MODE="never"; shift ;;
+    --bin|--nmminer-bin)
+      BIN="${2:?$1 requires a value}"; shift 2 ;;
+    --help|-h)
+      usage; exit 0 ;;
+    --)
+      shift; pass_args+=("$@"); break ;;
+    *)
+      pass_args+=("$1"); shift ;;
+  esac
+done
+
+if [[ ! -x "${BIN}" ]]; then
+  echo "Missing executable ${BIN}" >&2
+  exit 127
+fi
+
+case "${SCREEN_MODE}" in
+  pretty|raw) ;;
+  *) echo "Invalid screen mode: ${SCREEN_MODE}" >&2; exit 2 ;;
+esac
+
+case "${COLOR_MODE}" in
+  always|auto|never) ;;
+  *) echo "Invalid color mode: ${COLOR_MODE}" >&2; exit 2 ;;
+esac
+
+if [[ "${SCREEN_MODE}" == "raw" ]]; then
+  exec "${BIN}" "${pass_args[@]}"
+fi
+
+export NMMINER_OVERLAY_COLOR="${COLOR_MODE}"
+exec python3 - "${BIN}" "${pass_args[@]}" <<'PY'
+import os
+import pty
+import re
+import select
+import shutil
+import signal
+import subprocess
+import sys
+import termios
+import time
+
+if len(sys.argv) < 2:
+    print("Missing nmminer binary path", file=sys.stderr)
+    sys.exit(127)
+
+miner_bin = sys.argv[1]
+miner_args = sys.argv[2:]
+use_color = os.environ.get("NMMINER_OVERLAY_COLOR", "always") != "never"
+
+ansi_re = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+live_hash_re = re.compile(r"(?:live/current-work\s+)?hashrate:\s*([0-9.]+)\s*H/s", re.I)
+bench_hash_re = re.compile(r"RESULT:\s*([0-9.]+)\s*H/s", re.I)
+shares_re = re.compile(r"shares\s+([0-9]+)\s+blocks\s+([0-9]+)")
+block_re = re.compile(r"block\s+([0-9]+)\s+\(epoch\s+([0-9]+)\)")
+worker_re = re.compile(r"\|\s+worker\s+([^|]+)")
+login_re = re.compile(r"\|\s+login\s+([^|]+)")
+pool_re = re.compile(r"(?:connecting to|connected to|pool)\s+([a-z0-9_.:-]+)", re.I)
+
+def arg_value(args, *names):
+    for i, arg in enumerate(args):
+        for name in names:
+            if arg == name and i + 1 < len(args):
+                return args[i + 1]
+            prefix = name + "="
+            if arg.startswith(prefix):
+                return arg[len(prefix):]
+    return None
+
+def detect_cpu():
+    try:
+        with open("/proc/cpuinfo", "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if line.lower().startswith("model name"):
+                    name = line.split(":", 1)[1].strip()
+                    return re.sub(r"\s+", " ", name)
+    except OSError:
+        pass
+    return "unknown CPU"
+
+def c(code):
+    return f"\033[{code}m" if use_color else ""
+
+RESET = c("0")
+BOLD = c("1")
+DIM = c("2")
+GREEN = c("38;5;40")
+YELLOW = c("38;5;220")
+RED = c("38;5;196")
+BLUE = c("38;5;75")
+WHITE = c("38;5;255")
+HEADER = c("30;48;5;76")
+PANEL = c("38;5;16;48;5;40")
+TITLE_BAR = c("1;30;48;5;82")
+STAT_LABEL_BAR = c("30;48;5;76")
+STAT_VALUE_BAR = c("1;30;48;5;82")
+CLEAR = "\033[2J\033[H" if use_color else "\n" * 4
+HOME = "\033[H" if use_color else ""
+CLEAR_LINE = "\033[2K" if use_color else ""
+HIDE = "\033[?25l" if use_color else ""
+SHOW = "\033[?25h" if use_color else ""
+
+def strip_ansi(s):
+    return ansi_re.sub("", s).replace("\x00", "").strip()
+
+def visible_len(s):
+    return len(strip_ansi(str(s)))
+
+def trunc(s, width):
+    clean = strip_ansi(str(s))
+    return str(s) if len(clean) <= width else clean[:max(0, width - 1)] + "..."
+
+def cell(s, width, align="left"):
+    s = trunc(s, width)
+    pad = max(0, width - visible_len(s))
+    if align == "right":
+        return " " * pad + s
+    if align == "center":
+        left = pad // 2
+        return " " * left + s + " " * (pad - left)
+    return s + " " * pad
+
+def split_widths(total, count):
+    base = total // count
+    extra = total % count
+    return [base + (1 if i < extra else 0) for i in range(count)]
+
+def metric_row(items, width):
+    widths = split_widths(width, len(items))
+    return "".join(cell(item, part, "center") for item, part in zip(items, widths))
+
+def fmt_hash(raw):
+    try:
+        h = float(raw)
+    except Exception:
+        return "-"
+    if h >= 1e6:
+        return f"{h / 1e6:.3f} MH/s"
+    if h >= 1e3:
+        return f"{h / 1e3:.3f} kH/s"
+    return f"{h:.0f} H/s"
+
+state = {
+    "started": time.time(),
+    "cpu": detect_cpu(),
+    "status": "starting",
+    "pool": arg_value(miner_args, "-o", "--url", "--pool") or "-",
+    "hash": "-",
+    "bench": "-",
+    "block": "-",
+    "epoch": "-",
+    "accepted": "0",
+    "rejected": "0",
+    "blocks": "0",
+    "login": "-",
+    "worker": "-",
+    "last": "waiting for miner output",
+    "exit": None,
+}
+logs = []
+prev_lines = []
+last_size = (0, 0)
+
+def is_banner_line(clean):
+    low = clean.lower()
+    if "bitcoinandy crb miner" in low:
+        return True
+    if "call neuromorph" in low and "dev fee" in low:
+        return True
+    banner_chars = sum(1 for ch in clean if ch in "_/\\|`'.,-")
+    text_chars = sum(1 for ch in clean if ch.isalnum())
+    return banner_chars >= 8 and text_chars <= 8
+
+def add_log(line):
+    clean = strip_ansi(line)
+    if clean:
+        logs.append(f"[{time.strftime('%H:%M:%S')}] {clean}")
+        del logs[:-500]
+
+def parse_line(line):
+    clean = strip_ansi(line)
+    if not clean:
+        return
+    low = clean.lower()
+    state["last"] = clean
+    m = live_hash_re.search(clean)
+    if m:
+        state["hash"] = fmt_hash(m.group(1))
+        state["status"] = "mining"
+    m = bench_hash_re.search(clean)
+    if m:
+        state["bench"] = fmt_hash(m.group(1))
+    m = shares_re.search(clean)
+    if m:
+        state["accepted"], state["blocks"] = m.group(1), m.group(2)
+    m = block_re.search(clean)
+    if m:
+        state["block"], state["epoch"] = m.group(1), m.group(2)
+    m = login_re.search(clean)
+    if m:
+        state["login"] = m.group(1).strip()
+    m = pool_re.search(clean)
+    if m and "." in m.group(1):
+        state["pool"] = m.group(1).strip()
+    m = worker_re.search(clean)
+    if m:
+        state["worker"] = m.group(1).strip()
+    if "share accepted" in low:
+        state["status"] = "share accepted"
+        if not shares_re.search(clean):
+            try:
+                state["accepted"] = str(int(state["accepted"]) + 1)
+            except ValueError:
+                state["accepted"] = "1"
+    elif "share rejected" in low or "error" in low or "failed" in low:
+        state["status"] = "warning/error"
+        if "share rejected" in low:
+            try:
+                state["rejected"] = str(int(state["rejected"]) + 1)
+            except ValueError:
+                state["rejected"] = "1"
+    elif "connected" in low or "logging in" in low:
+        state["status"] = "connected"
+    elif "disconnected" in low or "retry" in low:
+        state["status"] = "reconnecting"
+
+def uptime_text():
+    seconds = int(time.time() - state["started"])
+    hh, rem = divmod(seconds, 3600)
+    mm, ss = divmod(rem, 60)
+    return f"{hh:02d}:{mm:02d}:{ss:02d}"
+
+def build_screen():
+    cols, rows = shutil.get_terminal_size((112, 30))
+    width = max(80, cols - 1)
+    lines = []
+    title = "BITCOINANDY CRB MINER 0% FEE"
+    lines.append(TITLE_BAR + cell(f"  {title}  ", width, "center") + RESET)
+    cpu_line = f"*** CPU: {state['cpu']} ***"
+    lines.append(STAT_VALUE_BAR + cell(cpu_line, width, "center") + RESET)
+    lines.append(PANEL + cell(f"Uptime {uptime_text()}", width, "center") + RESET)
+    labels = ("HASHRATE", "ACCEPTED", "REJECTED", "BLOCKS", "JOB")
+    values = (
+        state["hash"],
+        state["accepted"],
+        state["rejected"],
+        state["blocks"],
+        f"{state['block']}/{state['epoch']}",
+    )
+    lines.append(STAT_LABEL_BAR + metric_row(labels, width) + RESET)
+    lines.append(STAT_VALUE_BAR + metric_row(values, width) + RESET)
+    details = f"Bench {state['bench']}  |  Status {state['status']}  |  Worker {state['worker']}"
+    lines.append(HEADER + cell(details, width) + RESET)
+    lines.append("")
+    lines.append(f"{GREEN}{BOLD}Pool:{RESET}  {trunc(state['pool'], max(10, width - 9))}")
+    lines.append(f"{BLUE}Login:{RESET} {trunc(state['login'], max(10, width - 10))}")
+    lines.append("")
+    lines.append(WHITE + "- Logs " + "-" * max(0, width - 8) + RESET)
+    for line in logs[-max(6, rows - len(lines) - 2):] or [f"[{time.strftime('%H:%M:%S')}] waiting for live nmminer logs"]:
+        low = strip_ansi(line).lower()
+        color = GREEN if "accepted" in low else RED if any(x in low for x in ("rejected", "error", "failed")) else YELLOW if any(x in low for x in ("retry", "disconnect")) else RESET
+        lines.append(color + trunc(line, width) + RESET)
+    lines.append(DIM + "Ctrl+C stops the miner. Use --raw for untouched nmminer output." + RESET)
+    return lines[:rows], (cols, rows)
+
+def render(force=False):
+    global prev_lines, last_size
+    lines, size = build_screen()
+    if not use_color:
+        sys.stdout.write("\n".join(strip_ansi(x) for x in lines) + "\n")
+        sys.stdout.flush()
+        return
+    if force or not prev_lines or size != last_size:
+        sys.stdout.write(CLEAR + HIDE)
+        prev_lines = []
+        last_size = size
+    out = [HOME]
+    for i in range(max(len(prev_lines), len(lines))):
+        new = lines[i] if i < len(lines) else ""
+        out.append(f"\033[{i + 1};1H{CLEAR_LINE}{new}")
+    sys.stdout.write("".join(out))
+    sys.stdout.flush()
+    prev_lines = list(lines)
+
+master, slave = pty.openpty()
+try:
+    attrs = termios.tcgetattr(slave)
+    attrs[3] &= ~getattr(termios, "ECHO", 0)
+    termios.tcsetattr(slave, termios.TCSANOW, attrs)
+except termios.error:
+    pass
+
+proc = subprocess.Popen([miner_bin] + miner_args, stdin=subprocess.DEVNULL, stdout=slave, stderr=slave, close_fds=True)
+os.close(slave)
+
+def forward_signal(signum, _frame):
+    try:
+        proc.send_signal(signum)
+    except ProcessLookupError:
+        pass
+
+signal.signal(signal.SIGTERM, forward_signal)
+signal.signal(signal.SIGINT, forward_signal)
+
+buffer = ""
+last_draw = 0
+dirty = True
+render(force=True)
+
+try:
+    while True:
+        ready, _, _ = select.select([master], [], [], 0.15)
+        if ready:
+            try:
+                data = os.read(master, 8192)
+            except OSError:
+                data = b""
+            if not data:
+                break
+            buffer += data.decode("utf-8", "replace").replace("\r", "\n")
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                clean = strip_ansi(line)
+                if clean:
+                    parse_line(clean)
+                    if not is_banner_line(clean):
+                        add_log(clean)
+                    dirty = True
+        now = time.time()
+        if now - last_draw >= 0.75 and (dirty or now - last_draw >= 1.5):
+            render()
+            last_draw = now
+            dirty = False
+        if proc.poll() is not None and not ready:
+            break
+    if buffer.strip():
+        clean = strip_ansi(buffer)
+        parse_line(clean)
+        if not is_banner_line(clean):
+            add_log(clean)
+    rc = proc.wait()
+    state["exit"] = rc
+    state["status"] = f"exited {rc}"
+    render(force=True)
+    sys.stdout.write(f"\n\n{SHOW}{YELLOW}nmminer exited with code {rc}.{RESET}\n")
+    sys.stdout.flush()
+    sys.exit(rc)
+finally:
+    try:
+        os.close(master)
+    except OSError:
+        pass
+    sys.stdout.write(SHOW)
+    sys.stdout.flush()
+PY
