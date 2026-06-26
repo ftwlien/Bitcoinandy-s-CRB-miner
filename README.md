@@ -4,6 +4,11 @@ This repo is Andy's protected CRB miner fork baseline. See
 `BITCOINANDYS_CRB_MINER_BASELINE.md` for the current validated CPU lanes and
 the rule for promoting future speedups.
 
+For the protected 7950X3D lane, the repo also includes the host-side
+`amd-pstate guided` persistence fix that restored `3060mrig1` from
+`118-120 kH/s` back to the validated `126-127 kH/s` window. See
+`scripts/install-bitcoinandy-crb-cpu-performance.sh` and the baseline note.
+
 A from-scratch, high-performance CPU miner for the **NeuroMorph** proof-of-work.
 Byte-identical hashes to consensus, **~1.4–2.1× the throughput of the current
 production `xmrig-cereblix` fork**, and it **adapts to each epoch and to the host

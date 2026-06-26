@@ -1,0 +1,11 @@
+[Unit]
+Description=Bitcoinandy CRB CPU performance mode for 7950X3D
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/bitcoinandy-crb-cpu-performance.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

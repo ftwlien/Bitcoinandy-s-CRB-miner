@@ -7,7 +7,8 @@ Protected live lanes:
 
 - `3060mrig1` / Ryzen 9 7950X3D:
   `nmminer.premask.lto`, `NM_L3_DATASETS=1`, `32` threads, `lanes=1`,
-  verified around `126-127 kH/s`, accepted shares, `0` rejects.
+  host CPU mode `amd-pstate guided`, verified around `126-127 kH/s`,
+  accepted shares, `0` rejects.
 - `maskin7950xrig1` / Ryzen 9 7950X:
   `nmminer.gcc12native-test`, `28` threads, `lanes=1`,
   verified around `90.5-90.8 kH/s`, accepted shares, `0` rejects.
@@ -24,3 +25,38 @@ The exact protected snapshot is stored under:
 
 That folder includes the manifest and exact per-rig work trees/binaries used
 for the three protected lanes.
+
+## 7950X3D Host Tuning Fix
+
+On 2026-06-26 the protected 7950X3D lane on `3060mrig1` dropped from the
+validated `126-127 kH/s` window to about `118-120 kH/s` while still running the
+same `nmminer.premask.lto` binary, `NM_L3_DATASETS=1`, `32` threads, and
+`lanes=1`. The miner was clean and shares were accepted with `0` rejects; the
+regression was the host CPU runtime mode.
+
+Switching `amd-pstate` from `active` to `guided`, then keeping performance
+governors/EPP and CPU boost enabled, immediately restored the live CRB window:
+`126.3`, `126.9`, `127.3`, `127.1`, and `126.1 kH/s`, accepted shares, `0`
+rejects.
+
+The persistent fix is included under `scripts/`:
+
+```bash
+sudo scripts/install-bitcoinandy-crb-cpu-performance.sh
+```
+
+Installed files:
+
+- `/usr/local/sbin/bitcoinandy-crb-cpu-performance.sh`
+- `/etc/systemd/system/bitcoinandy-crb-cpu-performance.service`
+
+Verify after boot or service restart:
+
+```bash
+cat /sys/devices/system/cpu/amd_pstate/status
+systemctl is-enabled bitcoinandy-crb-cpu-performance.service
+systemctl is-active bitcoinandy-crb-cpu-performance.service
+```
+
+Expected status on the protected 7950X3D lane is `guided`, `enabled`, and
+`active`.
