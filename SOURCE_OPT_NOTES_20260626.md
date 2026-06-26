@@ -184,6 +184,34 @@ live pool validation.
     - Final live check after restore: about `92.023 kH/s`, accepted shares,
       `0` rejects.
 
+- Deeper source/codegen pass after the protected baseline was published:
+  - GCC12 PGO/LTO on 9950X was rejected. Plain GCC12/LTO was flat
+    (`57.6 -> 57.7 kH/s` short offline), while PGO/LTO dropped to about
+    `55.5 kH/s`.
+  - 32-bit dataset-index source variant was correctness-clean on 9950X
+    (`VECTOR match YES`, `batch==single YES`) but slower:
+    old/live `57.920 kH/s`, clean source `57.776 kH/s`, idx32
+    `57.609` then `57.328 kH/s`.
+  - 9950X codegen sweep had noisy short-run temptations, but none survived a
+    longer A/B. Best-looking `-frename-registers` checked as old
+    `57.824` / `57.269 kH/s` versus candidate `57.461` / `57.344 kH/s`;
+    correct, not promoted.
+  - 7950X codegen sweep found a tiny `-fno-tree-vectorize` candidate that was
+    correctness-clean and slightly ahead offline: old `61.376` / `60.981 kH/s`
+    versus candidate `61.450` / `61.312 kH/s`. Live pool validation rejected
+    it anyway: it settled around `87-88 kH/s`, below the protected
+    `90.5-90.8 kH/s` lane, with accepted shares and `0` rejects.
+  - 7950X3D codegen sweep found an alignment-only candidate
+    (`-falign-functions=64 -falign-loops=64 -falign-jumps=64`) that looked
+    interesting in short offline checks (`91.871 kH/s` versus old
+    `87.007 kH/s`), but longer checks were noisy and live pool validation
+    rejected it. It settled around `120-121 kH/s`, below the protected
+    `126-127 kH/s` lane, with accepted shares and `0` rejects.
+  - Combination flags on 7950X3D (`align64 + -frename-registers`) were worse:
+    old `88.746 kH/s`, combo `85.006` / `83.882 kH/s`.
+  - Result: no deeper candidate from this pass beat the protected live lanes.
+    All three live rigs were restored to their protected binaries.
+
 ## Current conclusion
 
 The hot profile is dominated by the dependent 64 MiB dataset walk:
