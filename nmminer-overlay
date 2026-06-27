@@ -204,6 +204,8 @@ def is_banner_line(clean):
         return True
     banner_chars = sum(1 for ch in clean if ch in "_/\\|`'.,-")
     text_chars = sum(1 for ch in clean if ch.isalnum())
+    if clean.strip() and banner_chars >= 3 and text_chars <= 1:
+        return True
     return banner_chars >= 8 and text_chars <= 8
 
 def add_log(line):
