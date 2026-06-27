@@ -82,6 +82,7 @@ if len(sys.argv) < 2:
 miner_bin = sys.argv[1]
 miner_args = sys.argv[2:]
 use_color = os.environ.get("NMMINER_OVERLAY_COLOR", "always") != "never"
+log_path = os.environ.get("NMMINER_OVERLAY_LOG_PATH", "").strip()
 
 ansi_re = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 live_hash_re = re.compile(r"(?:live/current-work\s+)?hashrate:\s*([0-9.]+)\s*H/s", re.I)
@@ -211,8 +212,15 @@ def is_banner_line(clean):
 def add_log(line):
     clean = strip_ansi(line)
     if clean:
-        logs.append(f"[{time.strftime('%H:%M:%S')}] {clean}")
+        stamped = f"[{time.strftime('%H:%M:%S')}] {clean}"
+        logs.append(stamped)
         del logs[:-500]
+        if log_path:
+            try:
+                with open(log_path, "a", encoding="utf-8", errors="replace") as f:
+                    f.write(stamped + "\n")
+            except OSError:
+                pass
 
 def parse_line(line):
     clean = strip_ansi(line)
