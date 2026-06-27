@@ -26,6 +26,16 @@ The exact protected snapshot is stored under:
 That folder includes the manifest and exact per-rig work trees/binaries used
 for the three protected lanes.
 
+The currently promoted optimized binaries are also copied to
+`optimized-binaries/` for direct install and Docker packaging:
+
+- `optimized-binaries/7950x3d/nmminer.premask.lto`
+- `optimized-binaries/7950x/nmminer.gcc12native-test`
+- `optimized-binaries/9950x/nmminer.gcc12lto-live`
+
+Use `scripts/select-optimized-nmminer.sh` on a target host to install the
+matching full-speed binary for the detected CPU model.
+
 ## 7950X3D Host Tuning Fix
 
 On 2026-06-26 the protected 7950X3D lane on `3060mrig1` dropped from the

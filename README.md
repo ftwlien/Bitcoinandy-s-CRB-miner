@@ -4,6 +4,11 @@ This repo is Andy's protected CRB miner fork baseline. See
 `BITCOINANDYS_CRB_MINER_BASELINE.md` for the current validated CPU lanes and
 the rule for promoting future speedups.
 
+The repo now also carries the protected optimized binaries under
+`optimized-binaries/` so GitHub installs and Docker builds can run the
+full-speed lane instead of rebuilding only the slower generic `./nmminer`.
+See `OPTIMIZED_BINARIES.md`.
+
 For the protected 7950X3D lane, the repo also includes the host-side
 `amd-pstate guided` persistence fix that restored `3060mrig1` from
 `118-120 kH/s` back to the validated `126-127 kH/s` window. See
